@@ -87,7 +87,11 @@ String SOFTWARE_VERSION(SOFTWARE_VERSION_STR);
 #include <WiFiClient.h>
 #include <WiFiClientSecure.h>
 #include <HardwareSerial.h>
-#include <hwcrypto/sha.h>
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL (4, 4, 0)
+  #include <sha/sha_parallel_engine.h>  
+#else
+  #include <hwcrypto/sha.h>
+#endif
 #include <WebServer.h>
 #include <ESPmDNS.h>
 #endif
@@ -302,14 +306,20 @@ const uint8_t lcd_2004_rows = 4;
  * Serial declarations                                           *
  *****************************************************************/
 #if defined(ESP8266)
+#define HAS_SERIAL_GPS 1
 SoftwareSerial serialSDS;
 SoftwareSerial *serialGPS;
 SoftwareSerial serialNPM;
 SoftwareSerial serialIPS;
 #endif
 #if defined(ESP32)
-#define serialSDS (Serial1)
+
+#if !CONFIG_IDF_TARGET_ESP32C3
+#define HAS_SERIAL_GPS 1
 #define serialGPS (&(Serial2))
+#endif
+
+#define serialSDS (Serial1)
 #define serialNPM (Serial1)
 #define serialIPS (Serial1)
 #endif
@@ -1070,12 +1080,14 @@ static String IPS_version_date()
  *****************************************************************/
 static void disable_unneeded_nmea()
 {
+#ifdef HAS_SERIAL_GPS
 	serialGPS->println(F("$PUBX,40,GLL,0,0,0,0*5C")); // Geographic position, latitude / longitude
 //	serialGPS->println(F("$PUBX,40,GGA,0,0,0,0*5A")); // Global Positioning System Fix Data
 	serialGPS->println(F("$PUBX,40,GSA,0,0,0,0*4E")); // GPS DOP and active satellites
 //	serialGPS->println(F("$PUBX,40,RMC,0,0,0,0*47")); // Recommended minimum specific GPS/Transit data
 	serialGPS->println(F("$PUBX,40,GSV,0,0,0,0*59")); // GNSS satellites in view
 	serialGPS->println(F("$PUBX,40,VTG,0,0,0,0*5E")); // Track made good and ground speed
+#endif
 }
 
 /*****************************************************************
@@ -2048,7 +2060,7 @@ static void webserver_wifi()
 			page_content += wlan_ssid_to_table_row(wifiInfo[indices[i]].ssid, ((wifiInfo[indices[i]].encryptionType == ENC_TYPE_NONE) ? " " : u8"🔒"), wifiInfo[indices[i]].RSSI);
 #endif
 #if defined(ESP32)
-			page_content += wlan_ssid_to_table_row(wifiInfo[indices[i]].ssid, ((wifiInfo[indices[i]].encryptionType == WIFI_AUTH_OPEN) ? " " : u8"🔒"), wifiInfo[indices[i]].RSSI);
+			page_content += wlan_ssid_to_table_row(wifiInfo[indices[i]].ssid, ((wifiInfo[indices[i]].encryptionType == WIFI_AUTH_OPEN) ? " " : "🔒"), wifiInfo[indices[i]].RSSI);
 #endif
 		}
 		page_content += FPSTR(TABLE_TAG_CLOSE_BR);
@@ -2919,8 +2931,6 @@ static void waitForWifiToConnect(int maxRetries)
  * WiFi auto connecting script                                   *
  *****************************************************************/
 
-static WiFiEventHandler disconnectEventHandler;
-
 static void connectWifi()
 {
 	display_debug(F("Connecting to"), String(cfg::wlanssid));
@@ -2937,12 +2947,14 @@ static void connectWifi()
 	WiFi.setPhyMode(WIFI_PHY_MODE_11N);
 	delay(100);
 
-	disconnectEventHandler = WiFi.onStationModeDisconnected([](const WiFiEventStationModeDisconnected &evt)
-															{ last_disconnect_reason = evt.reason; });
+  WiFi.onEvent(
+      [](const WiFiEventStationModeDisconnected &evt){ last_disconnect_reason = evt.reason; }, 
+      ARDUINO_EVENT_WIFI_STA_DISCONNECTED
+  );
 #endif
-	if (WiFi.getAutoConnect())
+	if (WiFi.getAutoReconnect())
 	{
-		WiFi.setAutoConnect(false);
+		WiFi.setAutoReconnect(false);
 	}
 	if (!WiFi.getAutoReconnect())
 	{
@@ -5040,12 +5052,14 @@ static void display_values()
 		la_max_value = last_value_dnms_la_max;
 		la_min_value = last_value_dnms_la_min;
 	}
+#ifdef HAS_SERIAL_GPS
 	if (cfg::gps_read)
 	{
 		lat_value = last_value_GPS_lat;
 		lon_value = last_value_GPS_lon;
 		alt_value = last_value_GPS_alt;
 	}
+#endif
 	if (cfg::ppd_read || cfg::pms_read || cfg::hpm_read || cfg::sds_read)
 	{
 		screens[screen_count++] = 1;
@@ -5071,10 +5085,12 @@ static void display_values()
 	{
 		screens[screen_count++] = 4;
 	}
+#ifdef HAS_SERIAL_GPS
 	if (cfg::gps_read)
 	{
 		screens[screen_count++] = 5;
 	}
+#endif
 	if (cfg::dnms_read)
 	{
 		screens[screen_count++] = 6;
@@ -5391,7 +5407,9 @@ static void init_display()
 	// modifying the I2C speed to 400k, which overwhelms some of the
 	// sensors.
 	Wire.setClock(100000);
-	Wire.setClockStretchLimit(150000);
+#ifdef ESP8266
+    Wire.setClockStretchLimit(150000);
+#endif
 }
 
 /*****************************************************************
@@ -5941,6 +5959,7 @@ else if (cfg::ips_read)
 	debug_outln_info(F("\nChipId: "), esp_chipid);
 	debug_outln_info(F("\nMAC Id: "), esp_mac_id);
 
+#if HAS_SERIAL_GPS
 	if (cfg::gps_read)
 	{
 #if defined(ESP8266)
@@ -5953,6 +5972,7 @@ else if (cfg::ips_read)
 		debug_outln_info(F("Read GPS..."));
 		disable_unneeded_nmea();
 	}
+#endif
 
 	powerOnTestSensors();
 	logEnabledAPIs();
@@ -6086,6 +6106,7 @@ void loop(void)
 		}
 	}
 
+#ifdef HAS_SERIAL_GPS
 	if (cfg::gps_read && !gps_init_failed)
 	{
 		// process serial GPS data..
@@ -6101,6 +6122,7 @@ void loop(void)
 			starttime_GPS = act_milli;
 		}
 	}
+#endif
 
 	if ((msSince(last_scd30_millis) > SCD30_UPDATE_INTERVAL_MS) && cfg::scd30_read && (!scd30_init_failed))
 	{

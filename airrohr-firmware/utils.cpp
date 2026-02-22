@@ -215,12 +215,25 @@ bool launchUpdateLoader(const String& md5) {
 /*****************************************************************
  * check display values, return '-' if undefined                 *
  *****************************************************************/
-String check_display_value(double value, double undef, uint8_t len, uint8_t str_len) {
+String check_display_value(double value, double undef, uint8_t decimals, uint8_t width) {
 	RESERVE_STRING(s, 15);
-	s = (value != undef ? String(value, len) : String("-"));
-	while (s.length() < str_len) {
-		s = " " + s;
+	if (value != undef) {
+		char buf[32];
+		snprintf(buf, sizeof(buf), "%.*f", (int)decimals, value);
+		s = buf;
+	} else {
+		s = "-";
 	}
+
+	if (s.length() < width) {
+		size_t pad = width - s.length();
+		String out;
+		out.reserve(width);
+		for (size_t i = 0; i < pad; i++) out += ' ';
+		out += s;
+		return out;
+	}
+
 	return s;
 }
 
@@ -262,71 +275,74 @@ float readCorrectionOffset(const char* correction) {
  * Debug output                                                  *
  *****************************************************************/
 
-LoggingSerial Debug;
-
-#if defined(ESP8266)
-LoggingSerial::LoggingSerial()
-    : HardwareSerial(UART0)
-    , m_buffer(new circular_queue<uint8_t>(LARGE_STR))
-{
-}
-#endif
-
-#if defined(ESP32)
-LoggingSerial::LoggingSerial()
-    : HardwareSerial(0)
-{
-	m_buffer = xQueueCreate(LARGE_STR, sizeof(uint8_t));
-}
-#endif
-
-size_t LoggingSerial::write(uint8_t c)
+LoggingSerial::LoggingSerial(Stream& backend)
+: _stream(&backend), _print(&backend)
 {
 #if defined(ESP32)
-	xQueueSendToBack(m_buffer, ( void * ) &c, ( TickType_t ) 1);
+  _q = xQueueCreate(QSIZE, sizeof(uint8_t));
 #endif
-#if defined(ESP8266)
-	m_buffer->push(c);
-#endif
-	return HardwareSerial::write(c);
 }
 
-size_t LoggingSerial::write(const uint8_t *buffer, size_t size)
-{
+void LoggingSerial::begin(unsigned long baud, uint32_t waitMs) {
+  // This is intended for Debug bound to global Serial (CDC or UART).
+  Serial.begin(baud);
+
+#if defined(ARDUINO_USB_CDC_ON_BOOT) && ARDUINO_USB_CDC_ON_BOOT
+  uint32_t start = millis();
+  while (!Serial && (millis() - start) < waitMs) {
+    delay(10);
+  }
+#else
+  (void)waitMs;
+#endif
+}
+
 #if defined(ESP32)
-	for(int i = 0; i < size; i++) {
-		xQueueSendToBack(m_buffer, ( void * ) &buffer[i], ( TickType_t ) 1);
-	}
+void LoggingSerial::begin(HardwareSerial& uart, unsigned long baud, int8_t rxPin, int8_t txPin) {
+  if (rxPin >= 0 && txPin >= 0) {
+    uart.begin(baud, SERIAL_8N1, rxPin, txPin);
+  } else {
+    uart.begin(baud);
+  }
+}
 #endif
-#if defined(ESP8266)
-	m_buffer->push_n(buffer, size);
-#endif
-	return HardwareSerial::write(buffer, size);
+
+size_t LoggingSerial::write(uint8_t c) {
+  _push(c);
+  return _print ? _print->write(c) : 0;
 }
 
-String LoggingSerial::popLines()
-{
-	String r;
-#if defined(ESP8266)
-	while (m_buffer->available() > 0) {
-		uint8_t c = m_buffer->pop();
-		r += (char) c;
+size_t LoggingSerial::write(const uint8_t* buffer, size_t size) {
+  for (size_t i = 0; i < size; i++) _push(buffer[i]);
+  return _print ? _print->write(buffer, size) : 0;
+}
 
-		if (c == '\n' && r.length() > m_buffer->available())
-			break;
-	}
-#endif
+int LoggingSerial::available() { return _stream ? _stream->available() : 0; }
+int LoggingSerial::read()      { return _stream ? _stream->read() : -1; }
+int LoggingSerial::peek()      { return _stream ? _stream->peek() : -1; }
+void LoggingSerial::flush()    { if (_print) _print->flush(); }
+
+void LoggingSerial::_push(uint8_t c) {
 #if defined(ESP32)
-	uint8_t c;
-	while (xQueueReceive(m_buffer, &(c ), (TickType_t) 1 )) {
-		r += (char) c;
-
-		if (c == '\n' && r.length() > 10)
-			break;
-	}
+  if (_q) (void)xQueueSend(_q, &c, 0);
+#else
+  (void)c;
 #endif
-	return r;
 }
+
+String LoggingSerial::popLines() {
+  String out;
+#if defined(ESP32)
+  if (!_q) return out;
+  uint8_t c;
+  while (xQueueReceive(_q, &c, 0) == pdTRUE) {
+    out += char(c);
+  }
+#endif
+  return out;
+}
+
+LoggingSerial Debug(Serial);
 
 #define debug_level_check(level) { if (level > cfg::debug) return; }
 
@@ -383,7 +399,6 @@ void debug_outln_info_bool(const __FlashStringHelper* text, const bool option) {
 	Debug.print(text);
 	Debug.println(String(option));
 }
-
 #undef debug_level_check
 
 

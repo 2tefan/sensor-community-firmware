@@ -39,7 +39,11 @@
 #include <WiFiClient.h>
 #include <WiFiClientSecure.h>
 #include <HardwareSerial.h>
-#include <hwcrypto/sha.h>
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL (4, 4, 0)
+  #include <sha/sha_parallel_engine.h>  
+#else
+  #include <hwcrypto/sha.h>
+#endif
 #include <freertos/queue.h>
 #endif
 
@@ -90,7 +94,9 @@ extern SoftwareSerial serialIPS;
 #endif
 #if defined(ESP32)
 #define serialSDS (Serial1)
+#ifdef HAS_SERIAL2
 #define serialGPS (&(Serial2))
+#endif
 #define serialNPM (Serial1)
 #define serialIPS (Serial1)
 #endif
@@ -132,21 +138,39 @@ enum class PmSensorCmd3 { // for IPS7100
  * Debug output                                                  *
  *****************************************************************/
 
-class LoggingSerial : public HardwareSerial {
-
+class LoggingSerial : public Stream {
 public:
-	LoggingSerial();
-    size_t write(uint8_t c) override;
-    size_t write(const uint8_t *buffer, size_t size) override;
-	String popLines();
+  explicit LoggingSerial(Stream& backend);
+
+  // Keep old call sites working: Debug.begin(115200);
+  void begin(unsigned long baud = 115200, uint32_t waitMs = 1500);
+
+#if defined(ESP32)
+  // Explicit UART begin (no RTTI required)
+  void begin(HardwareSerial& uart, unsigned long baud,
+             int8_t rxPin = -1, int8_t txPin = -1);
+#endif
+
+  size_t write(uint8_t c) override;
+  size_t write(const uint8_t* buffer, size_t size) override;
+
+  int available() override;
+  int read() override;
+  int peek() override;
+  void flush() override;
+
+  String popLines();
 
 private:
-#if defined(ESP8266)
-	std::unique_ptr<circular_queue<uint8_t> > m_buffer;
-#endif
+  Stream* _stream;
+  Print*  _print;
+
 #if defined(ESP32)
-	QueueHandle_t m_buffer;
+  QueueHandle_t _q = nullptr;
+  static constexpr size_t QSIZE = 1024;
 #endif
+
+  void _push(uint8_t c);
 };
 
 extern class LoggingSerial Debug;
