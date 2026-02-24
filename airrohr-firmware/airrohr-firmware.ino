@@ -314,7 +314,7 @@ SoftwareSerial serialIPS;
 #endif
 #if defined(ESP32)
 
-#if !CONFIG_IDF_TARGET_ESP32C3
+#if !defined(CONFIG_IDF_TARGET_ESP32C3)
 #define HAS_SERIAL_GPS 1
 #define serialGPS (&(Serial2))
 #endif

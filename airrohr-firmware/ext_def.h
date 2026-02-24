@@ -161,16 +161,16 @@ static const char MEASUREMENT_NAME_INFLUX[] PROGMEM = "feinstaub";
 #define PM_SERIAL_GPS_TX_OR_SDA D21
 #else
 #define ONEWIRE_PIN D10 // Needs testing!
-#define PM_SERIAL_RX D21
-#define PM_SERIAL_TX D20
-#define PIN_CS D9
-#define PM_SERIAL_SCL_OR_GPS_TX D23
-#define PM_SERIAL_SDA_OR_GPS_RX D19
+#define PM_SERIAL_RX D20
+#define PM_SERIAL_TX D21
+#define PIN_CS D10
+#define PM_SERIAL_SCL_OR_GPS_TX D9
+#define PM_SERIAL_SDA_OR_GPS_RX D8
 #define PM_SERIAL_GPS_RX_OR_SCL D22 // GPS needs testing as well!
 #define PM_SERIAL_GPS_TX_OR_SDA D9
 #endif
 
-#if defined(FLIP_I2C_PMSERIAL) // exchange the pins of the ports to use external i2c connector for gps
+#if !defined(FLIP_I2C_PMSERIAL) // exchange the pins of the ports to use external i2c connector for gps
 #define I2C_PIN_SCL PM_SERIAL_SCL_OR_GPS_TX
 #define I2C_PIN_SDA PM_SERIAL_SDA_OR_GPS_RX
 #define GPS_SERIAL_RX PM_SERIAL_GPS_RX_OR_SCL

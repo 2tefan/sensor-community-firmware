@@ -146,6 +146,7 @@ constexpr const unsigned long DURATION_BEFORE_FORCED_RESTART_MS = ONE_DAY_IN_MS 
 #define D36_INPUTONLY 36
 #define D39_INPUTONLY 39
 #else // ESP32-C3 doesn't have so many GPIO pins :'(
+#define D8 8
 #define D9 9
 #define D10 10
 #define D19 19
