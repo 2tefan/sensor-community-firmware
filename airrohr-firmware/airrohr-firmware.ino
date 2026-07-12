@@ -87,6 +87,7 @@ String SOFTWARE_VERSION(SOFTWARE_VERSION_STR);
 #include <WiFiClient.h>
 #include <WiFiClientSecure.h>
 #include <HardwareSerial.h>
+#include <esp_wifi.h>
 #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL (4, 4, 0)
   #include <sha/sha_parallel_engine.h>  
 #else
@@ -627,7 +628,7 @@ double last_value_GPS_lon = -200.0;
 String last_value_GPS_timestamp;
 String last_data_string;
 int last_signal_strength;
-int last_disconnect_reason;
+int last_disconnect_reason = -1;
 
 String esp_chipid;
 String esp_mac_id;
@@ -670,6 +671,127 @@ IPAddress addr_static_ip;
 IPAddress addr_static_subnet;
 IPAddress addr_static_gateway;
 IPAddress addr_static_dns;
+
+#if defined(ESP32)
+static String wifiAuthModeName(uint8_t authMode)
+{
+	switch (authMode)
+	{
+	case WIFI_AUTH_OPEN: return F("OPEN");
+	case WIFI_AUTH_WEP: return F("WEP");
+	case WIFI_AUTH_WPA_PSK: return F("WPA_PSK");
+	case WIFI_AUTH_WPA2_PSK: return F("WPA2_PSK");
+	case WIFI_AUTH_WPA_WPA2_PSK: return F("WPA_WPA2_PSK");
+	case WIFI_AUTH_WPA2_ENTERPRISE: return F("WPA2_ENTERPRISE");
+	case WIFI_AUTH_WPA3_PSK: return F("WPA3_PSK");
+	case WIFI_AUTH_WPA2_WPA3_PSK: return F("WPA2_WPA3_PSK");
+	case WIFI_AUTH_WAPI_PSK: return F("WAPI_PSK");
+	default: return String(F("UNKNOWN(")) + String(authMode) + ')';
+	}
+}
+
+static String bssidToString(const uint8_t *bssid)
+{
+	if (!bssid)
+	{
+		return F("n/a");
+	}
+	char mac[18];
+	snprintf(mac, sizeof(mac), "%02X:%02X:%02X:%02X:%02X:%02X", bssid[0], bssid[1], bssid[2], bssid[3], bssid[4], bssid[5]);
+	return String(mac);
+}
+
+static void debugWifiNetworkInfo(unsigned i, const String &ssid, uint8_t encryptionType, int32_t rssi, const uint8_t *bssid, int32_t channel)
+{
+	// Keep these lines short; very long debug lines can block some displays/serial paths.
+	debug_outln_info(String(F("WiFi scan #")) + String(i) + F(": ") + ssid);
+	debug_outln_info(F("  RSSI: "), String(rssi));
+	debug_outln_info(F("  channel: "), String(channel));
+	debug_outln_info(F("  auth: "), wifiAuthModeName(encryptionType));
+	debug_outln_info(F("  bssid: "), bssidToString(bssid));
+}
+
+static bool esp32ConnectWifiCompat(const char *ssid, const char *password, const uint8_t *bssid, int32_t channel)
+{
+	debug_outln_info(F("WiFi password length: "), String(strlen(password)));
+	debug_outln_info(F("Using ESP-IDF WiFi connect path"));
+
+	esp_wifi_set_ps(WIFI_PS_NONE);
+	esp_wifi_set_protocol(WIFI_IF_STA, WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N);
+	esp_wifi_set_bandwidth(WIFI_IF_STA, WIFI_BW_HT20);
+	// Reduce TX power for better RF behavior in tight enclosures / close APs.
+	// Unit is quarter-dBm: 44 = 11 dBm.
+	esp_err_t txPowerErr = esp_wifi_set_max_tx_power(68);
+	debug_outln_info(F("esp_wifi_set_max_tx_power(17dBm): "), String(static_cast<int>(txPowerErr)));
+	esp_wifi_disconnect();
+	delay(100);
+
+	wifi_config_t staConfig;
+	memset(&staConfig, 0, sizeof(staConfig));
+	strncpy(reinterpret_cast<char *>(staConfig.sta.ssid), ssid, sizeof(staConfig.sta.ssid) - 1);
+	strncpy(reinterpret_cast<char *>(staConfig.sta.password), password, sizeof(staConfig.sta.password) - 1);
+	staConfig.sta.threshold.authmode = strlen(password) ? WIFI_AUTH_WPA_PSK : WIFI_AUTH_OPEN;
+	staConfig.sta.pmf_cfg.capable = false;
+	staConfig.sta.pmf_cfg.required = false;
+	if (bssid && channel > 0)
+	{
+		memcpy(staConfig.sta.bssid, bssid, 6);
+		staConfig.sta.bssid_set = true;
+		staConfig.sta.channel = static_cast<uint8_t>(channel);
+		debug_outln_info(F("Forcing BSSID: "), bssidToString(bssid));
+		debug_outln_info(F("Forcing channel: "), String(channel));
+	}
+
+	esp_err_t err = esp_wifi_set_config(WIFI_IF_STA, &staConfig);
+	debug_outln_info(F("esp_wifi_set_config: "), String(static_cast<int>(err)));
+	if (err != ESP_OK)
+	{
+		return false;
+	}
+	err = esp_wifi_connect();
+	debug_outln_info(F("esp_wifi_connect: "), String(static_cast<int>(err)));
+	return err == ESP_OK;
+}
+
+static bool findBestWifiNetwork(const char *targetSsid, uint8_t bestBssid[6], int32_t &bestChannel)
+{
+	int32_t bestRssi = -1000;
+	bool found = false;
+	int16_t scanCount = WiFi.scanNetworks(false, true);
+	debug_outln_info(F("Visible WiFi networks: "), String(scanCount));
+	for (int16_t i = 0; i < scanCount; ++i)
+	{
+		String SSID;
+		uint8_t encryptionType;
+		int32_t RSSI;
+		uint8_t *BSSID;
+		int32_t channel;
+		WiFi.getNetworkInfo(i, SSID, encryptionType, RSSI, BSSID, channel);
+		if (SSID == String(targetSsid))
+		{
+			debugWifiNetworkInfo(i, SSID, encryptionType, RSSI, BSSID, channel);
+			if (BSSID && RSSI > bestRssi)
+			{
+				memcpy(bestBssid, BSSID, 6);
+				bestChannel = channel;
+				bestRssi = RSSI;
+				found = true;
+			}
+		}
+	}
+	if (found)
+	{
+		debug_outln_info(F("Selected WiFi BSSID: "), bssidToString(bestBssid));
+		debug_outln_info(F("Selected WiFi channel: "), String(bestChannel));
+		debug_outln_info(F("Selected WiFi RSSI: "), String(bestRssi));
+	}
+	else
+	{
+		debug_outln_info(F("Target SSID not found in scan: "), String(targetSsid));
+	}
+	return found;
+}
+#endif
 
 
 
@@ -2815,6 +2937,7 @@ static void wifiConfig()
 #else
 		WiFi.getNetworkInfo(i, SSID, wifiInfo[i].encryptionType,
 							wifiInfo[i].RSSI, BSSID, wifiInfo[i].channel);
+		debugWifiNetworkInfo(i, SSID, wifiInfo[i].encryptionType, wifiInfo[i].RSSI, BSSID, wifiInfo[i].channel);
 #endif
 		SSID.toCharArray(wifiInfo[i].ssid, sizeof(wifiInfo[0].ssid));
 	}
@@ -2831,6 +2954,10 @@ static void wifiConfig()
 #endif
 
 	WiFi.mode(WIFI_AP);
+#if defined(ESP32)
+	WiFi.setSleep(false);
+	esp_wifi_set_bandwidth(WIFI_IF_AP, WIFI_BW_HT20);
+#endif
 	const IPAddress apIP(
 		default_ip_first_octet, 
 		default_ip_second_octet, 
@@ -2875,12 +3002,22 @@ static void wifiConfig()
 #endif
 
 	WiFi.mode(WIFI_STA);
+#if defined(ESP32)
+	WiFi.setSleep(false);
+	esp_wifi_set_bandwidth(WIFI_IF_STA, WIFI_BW_HT20);
+#endif
 
 	dnsServer.stop();
 	delay(100);
 
 	debug_outln_info(FPSTR(DBG_TXT_CONNECTING_TO), cfg::wlanssid);
 
+#if defined(ESP32)
+	uint8_t bestBssid[6] = {0};
+	int32_t bestChannel = 0;
+	bool bestNetworkFound = findBestWifiNetwork(cfg::wlanssid, bestBssid, bestChannel);
+	esp32ConnectWifiCompat(cfg::wlanssid, cfg::wlanpwd, bestNetworkFound ? bestBssid : nullptr, bestNetworkFound ? bestChannel : 0);
+#else
 	if( *cfg::wlanpwd ) // non-empty password
 	{
 		WiFi.begin(cfg::wlanssid, cfg::wlanpwd);
@@ -2889,6 +3026,7 @@ static void wifiConfig()
 	{
 		WiFi.begin(cfg::wlanssid); // since somewhen, the espressif API changed semantics: no password need the 1 args call since.
 	}
+#endif
 
 	debug_outln_info(F("---- Result Webconfig ----"));
 	debug_outln_info(F("WLANSSID: "), cfg::wlanssid);
@@ -2925,6 +3063,11 @@ static void waitForWifiToConnect(int maxRetries)
 		debug_out(".", DEBUG_MIN_INFO);
 		++retryCount;
 	}
+	if (WiFi.status() != WL_CONNECTED)
+	{
+		debug_outln_info(F("WiFi connect timeout. status: "), String(WiFi.status()));
+		debug_outln_info(F("Last disconnect reason: "), String(last_disconnect_reason));
+	}
 }
 
 /*****************************************************************
@@ -2952,6 +3095,17 @@ static void connectWifi()
       ARDUINO_EVENT_WIFI_STA_DISCONNECTED
   );
 #endif
+#if defined(ESP32)
+	static bool wifiEventHandlerRegistered = false;
+	if (!wifiEventHandlerRegistered)
+	{
+		WiFi.onEvent([](WiFiEvent_t event, WiFiEventInfo_t info) {
+			last_disconnect_reason = info.wifi_sta_disconnected.reason;
+			debug_outln_info(F("WiFi disconnected, reason: "), String(last_disconnect_reason));
+		}, WiFiEvent_t::ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
+		wifiEventHandlerRegistered = true;
+	}
+#endif
 	if (WiFi.getAutoReconnect())
 	{
 		WiFi.setAutoReconnect(false);
@@ -2973,6 +3127,14 @@ static void connectWifi()
 #endif
 
 	WiFi.mode(WIFI_STA);
+#if defined(ESP32)
+	WiFi.setSleep(false);
+	esp_wifi_set_bandwidth(WIFI_IF_STA, WIFI_BW_HT20);
+	debug_outln_info(F("Scanning before STA connect..."));
+	uint8_t bestBssid[6] = {0};
+	int32_t bestChannel = 0;
+	bool bestNetworkFound = findBestWifiNetwork(cfg::wlanssid, bestBssid, bestChannel);
+#endif
 
 #if defined(ESP8266)
 	WiFi.hostname(cfg::fs_ssid);
@@ -2990,7 +3152,11 @@ static void connectWifi()
 	WiFi.setHostname(cfg::fs_ssid);
 #endif
 
+#if defined(ESP32)
+	esp32ConnectWifiCompat(cfg::wlanssid, cfg::wlanpwd, bestNetworkFound ? bestBssid : nullptr, bestNetworkFound ? bestChannel : 0);
+#else
 	WiFi.begin(cfg::wlanssid, cfg::wlanpwd); // Start WiFI
+#endif
 
 	debug_outln_info(FPSTR(DBG_TXT_CONNECTING_TO), cfg::wlanssid);
 
